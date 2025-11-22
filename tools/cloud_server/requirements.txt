@@ -1,0 +1,10 @@
+# TF-M Cloud Server Requirements
+flask==3.0.0
+flask-cors==4.0.0
+cryptography==41.0.7
+cbor2==5.5.1
+paho-mqtt==1.6.1
+
+# Optional for development
+pytest==7.4.3
+requests==2.31.0
