@@ -4129,3 +4129,59 @@ Rollback check: UID 5001
 **Summary:** Module 12 provides complete coverage of PSA Secure Storage with ~1200 lines of detailed explanations, diagrams, and working code examples.
 
 ---
+## Module 13: Initial Attestation
+
+### 13.1 What is Attestation?
+
+#### Simple Explanation
+
+**Attestation** is a cryptographic proof that a device is genuine and in a known, trusted state. It's like a digital passport for your IoT device.
+
+**Real-world analogy:**
+- Your passport proves who you are and where you're from
+- Attestation token proves the device is genuine and what software it's running
+- Just as a passport has a government signature, attestation has a cryptographic signature
+
+**Why do we need Attestation?**
+
+```
+Problem Without Attestation:
+═══════════════════════════════════════════════════════════
+
+Cloud Server receives data:
+┌─────────────────────────────────────┐
+│ From: Device claiming to be "DEV123" │
+│ Data: Temperature = 25°C            │
+└─────────────────────────────────────┘
+
+Questions server cannot answer:
+✗ Is this really DEV123 or an imposter?
+✗ Is the device running genuine firmware?
+✗ Has the firmware been tampered with?
+✗ Is the device in a secure boot chain?
+✗ Can I trust this data?
+
+Solution With Attestation:
+═══════════════════════════════════════════════════════════
+
+Device sends Attestation Token:
+┌────────────────────────────────────────────────┐
+│ Device ID: DEV123                              │
+│ Firmware Version: 2.5.1                        │
+│ Firmware Hash: 0x7a3f9c...                     │
+│ Boot Status: SECURE_BOOT_PASSED                │
+│ Security Lifecycle: SECURED                    │
+│ Signature: [ECDSA P-256 signature]             │
+└────────────────────────────────────────────────┘
+
+Server can now verify:
+✓ Device is authentic (signature valid)
+✓ Firmware version is approved
+✓ Firmware hash matches expected value
+✓ Boot chain is secure
+✓ Data can be trusted
+```
+
+**Module 13 Initial Attestation complete overview with EAT token format, data flow, and API examples to be continued...**
+
+---
