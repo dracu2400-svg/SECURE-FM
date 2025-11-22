@@ -2121,3 +2121,399 @@ Verifying signature...
 ---
 
 **Note:** Sections 11.8 (Key Derivation) and 11.9 (Hardware Acceleration) will be covered in the next update along with Modules 12-15.
+
+#### Module 11 Summary: Crypto Operations Quick Reference
+
+```
+PSA Crypto API Quick Reference Card:
+═══════════════════════════════════════════════════════════════════
+
+HASHING (11.3):
+  psa_hash_compute(PSA_ALG_SHA_256, data, len, hash, 32, &len)
+  Use: Data integrity, fingerprinting
+  Output: 32 bytes (SHA-256)
+
+MAC (11.4):
+  psa_mac_compute(key, PSA_ALG_HMAC(PSA_ALG_SHA_256), msg, len, mac, 32, &len)
+  Use: Message authentication
+  Output: 32 bytes (HMAC-SHA256)
+
+SYMMETRIC ENCRYPTION (11.5):
+  psa_cipher_encrypt(key, PSA_ALG_CBC_NO_PADDING, plain, len, cipher, size, &len)
+  Use: Fast bulk encryption
+  Speed: ~50 MB/s (hardware accelerated)
+
+AEAD (11.6):
+  psa_aead_encrypt(key, PSA_ALG_GCM, nonce, 12, aad, aad_len, plain, len, out, size, &len)
+  Use: Encrypt + authenticate (TLS, secure storage)
+  Output: ciphertext + 16-byte tag
+
+DIGITAL SIGNATURES (11.7):
+  psa_sign_message(key, PSA_ALG_ECDSA(PSA_ALG_SHA_256), msg, len, sig, 64, &len)
+  psa_verify_message(key, PSA_ALG_ECDSA(PSA_ALG_SHA_256), msg, len, sig, 64)
+  Use: Firmware signing, attestation
+  Output: 64 bytes (ECDSA P-256)
+
+When to use what:
+┌──────────────────────────────────────────────────────────┐
+│ Need confidentiality only?      → AES-CBC / AES-CTR     │
+│ Need integrity only?             → HMAC / Hash          │
+│ Need both?                       → AEAD (AES-GCM)       │
+│ Need authentication?             → Digital Signature    │
+│ Need key agreement?              → ECDH (Module 11.8)   │
+└──────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Module 12: Secure Storage (ITS and PS)
+
+### 12.1 Introduction to PSA Secure Storage
+
+#### What is Secure Storage?
+
+**Simple Explanation:**
+Secure storage is like a safe deposit box for your data. It provides:
+1. **Confidentiality**: Data is encrypted, can't be read without authorization
+2. **Integrity**: Detects if data has been tampered with
+3. **Persistence**: Data survives power loss and reboots
+4. **Access Control**: Only authorized code can access the data
+
+**Real-world analogy:**
+Think of it like storing valuables at a bank:
+- Bank vault = Secure storage partition
+- Safe deposit box = Storage file
+- Your key = Access permissions
+- Bank security = TF-M enforcement
+
+#### PSA Storage Architecture Overview
+
+```
+PSA Storage Services:
+═══════════════════════════════════════════════════════════
+
+Two Types of Storage:
+
+1. ITS (Internal Trusted Storage)
+   ┌────────────────────────────────────┐
+   │  ✓ Small data (< 2 KB typical)    │
+   │  ✓ Fast access                     │
+   │  ✓ Internal flash only             │
+   │  ✓ Mandatory rollback protection  │
+   │  ✓ No dependencies                 │
+   │  ✓ Power-loss resilient            │
+   │                                    │
+   │  Use cases:                        │
+   │  - Cryptographic keys              │
+   │  - Device identity                 │
+   │  - Security counters               │
+   │  - Trust anchors                   │
+   └────────────────────────────────────┘
+
+2. PS (Protected Storage)
+   ┌────────────────────────────────────┐
+   │  ✓ Large data (MBs)                │
+   │  ✓ External flash support          │
+   │  ✓ Optional rollback protection   │
+   │  ✓ Encryption + authentication     │
+   │  ✓ Depends on ITS for metadata    │
+   │                                    │
+   │  Use cases:                        │
+   │  - Configuration files             │
+   │  - Certificates                    │
+   │  - User data                       │
+   │  - Application settings            │
+   └────────────────────────────────────┘
+```
+
+#### Storage Data Flow
+
+**Understanding how storage works internally:**
+
+```
+ITS Write Operation Data Flow:
+═══════════════════════════════════════════════════════════
+
+Non-Secure App                  Secure World (TF-M)
+┌──────────────┐               ┌─────────────────────┐
+│              │               │                     │
+│  Application │               │  ITS Service        │
+│              │               │  (Secure Partition) │
+└──────┬───────┘               └──────┬──────────────┘
+       │                              │
+       │ 1. psa_its_set()            │
+       │    (uid=100, data, len)     │
+       ├─────────────────────────────►│
+       │                              │
+       │                              │ 2. Validate parameters
+       │                              │    Check permissions
+       │                              │
+       │                              ▼
+       │                       ┌─────────────────┐
+       │                       │ Encrypt data    │
+       │                       │ (AES-GCM)       │
+       │                       │ Add auth tag    │
+       │                       └────────┬────────┘
+       │                                │
+       │                                ▼
+       │                       ┌─────────────────┐
+       │                       │ Flash Driver    │
+       │                       │ Write to flash  │
+       │                       └────────┬────────┘
+       │                                │
+       │                                ▼
+       │                       ┌─────────────────┐
+       │                       │ Internal Flash  │
+       │                       │ ┌─────────────┐ │
+       │                       │ │ uid: 100    │ │
+       │                       │ │ len: 256    │ │
+       │                       │ │ data: [enc] │ │
+       │                       │ │ tag: [auth] │ │
+       │                       │ └─────────────┘ │
+       │                       └─────────────────┘
+       │                              │
+       │ 3. PSA_SUCCESS              │
+       │◄─────────────────────────────┤
+       │                              │
+       ▼                              ▼
+
+ITS Read Operation Data Flow:
+═══════════════════════════════════════════════════════════
+
+       │ 1. psa_its_get()            │
+       │    (uid=100, buf, len)      │
+       ├─────────────────────────────►│
+       │                              │
+       │                              │ 2. Lookup UID in flash
+       │                              │
+       │                              ▼
+       │                       ┌─────────────────┐
+       │                       │ Read from flash │
+       │                       └────────┬────────┘
+       │                                │
+       │                                ▼
+       │                       ┌─────────────────┐
+       │                       │ Verify auth tag │
+       │                       │ (detect tampering)
+       │                       └────────┬────────┘
+       │                                │
+       │                                ▼
+       │                       ┌─────────────────┐
+       │                       │ Decrypt data    │
+       │                       │ (AES-GCM)       │
+       │                       └────────┬────────┘
+       │                                │
+       │ 3. Return data                │
+       │◄─────────────────────────────┤
+       │                              │
+       ▼                              ▼
+```
+
+#### Simple ITS Example
+
+**Explanation:** ITS (Internal Trusted Storage) is the simplest storage API. Perfect for small, critical data like keys and counters.
+
+```c
+#include "psa/internal_trusted_storage.h"
+
+/**
+ * SIMPLE ITS EXAMPLE: Store and retrieve data
+ *
+ * What this does:
+ * 1. Store data with a unique identifier (UID)
+ * 2. Retrieve data by UID
+ * 3. Remove data
+ *
+ * Important concepts:
+ * - UID: Unique identifier (64-bit number, choose your own range)
+ * - Data: Arbitrary bytes (encrypted automatically by TF-M)
+ * - Atomicity: Write completes fully or not at all
+ *
+ * Use case: Storing device serial number, provisioning data
+ */
+
+#define MY_DEVICE_SERIAL_UID  1001
+#define MY_CONFIG_UID         1002
+
+int simple_its_example(void)
+{
+    psa_status_t status;
+
+    printf("=== Simple ITS Example ===\n\n");
+
+    /* Step 1: Store device serial number */
+    const char *serial_number = "DEV-STM32U5-12345678";
+    size_t serial_len = strlen(serial_number) + 1;  /* Include null terminator */
+
+    printf("Storing serial number: \"%s\"\n", serial_number);
+
+    status = psa_its_set(
+        MY_DEVICE_SERIAL_UID,           /* Unique ID */
+        serial_len,                      /* Data length */
+        (const void*)serial_number,      /* Data pointer */
+        PSA_STORAGE_FLAG_NONE            /* Flags (no special flags) */
+    );
+
+    if (status != PSA_SUCCESS) {
+        printf("✗ Failed to store serial: %d\n", status);
+        return -1;
+    }
+    printf("✓ Serial number stored (UID: %u)\n\n", MY_DEVICE_SERIAL_UID);
+
+    /* Step 2: Store configuration data */
+    typedef struct {
+        uint32_t update_interval_sec;
+        uint32_t telemetry_enabled;
+        uint32_t debug_level;
+    } device_config_t;
+
+    device_config_t config = {
+        .update_interval_sec = 3600,  /* Check updates every hour */
+        .telemetry_enabled = 1,
+        .debug_level = 2
+    };
+
+    printf("Storing configuration:\n");
+    printf("  Update interval: %u seconds\n", config.update_interval_sec);
+    printf("  Telemetry: %s\n", config.telemetry_enabled ? "enabled" : "disabled");
+    printf("  Debug level: %u\n", config.debug_level);
+
+    status = psa_its_set(
+        MY_CONFIG_UID,
+        sizeof(config),
+        &config,
+        PSA_STORAGE_FLAG_NONE
+    );
+
+    if (status == PSA_SUCCESS) {
+        printf("✓ Configuration stored\n\n");
+    }
+
+    /* Step 3: Retrieve serial number */
+    printf("--- Retrieving Data ---\n");
+
+    /* First, get info about the stored data */
+    struct psa_storage_info_t info;
+
+    status = psa_its_get_info(MY_DEVICE_SERIAL_UID, &info);
+    if (status == PSA_SUCCESS) {
+        printf("Serial number info:\n");
+        printf("  Size: %zu bytes\n", info.size);
+        printf("  Flags: 0x%x\n", info.flags);
+    }
+
+    /* Now read the actual data */
+    char retrieved_serial[64];
+    size_t retrieved_len;
+
+    status = psa_its_get(
+        MY_DEVICE_SERIAL_UID,
+        0,                              /* Offset (start from beginning) */
+        sizeof(retrieved_serial),       /* Buffer size */
+        retrieved_serial,               /* Output buffer */
+        &retrieved_len                  /* Actual data length */
+    );
+
+    if (status == PSA_SUCCESS) {
+        printf("✓ Retrieved serial: \"%s\" (%zu bytes)\n", retrieved_serial, retrieved_len);
+    }
+
+    /* Step 4: Retrieve configuration */
+    device_config_t retrieved_config;
+
+    status = psa_its_get(
+        MY_CONFIG_UID,
+        0,
+        sizeof(retrieved_config),
+        &retrieved_config,
+        &retrieved_len
+    );
+
+    if (status == PSA_SUCCESS) {
+        printf("✓ Retrieved configuration:\n");
+        printf("  Update interval: %u seconds\n", retrieved_config.update_interval_sec);
+        printf("  Telemetry: %s\n", retrieved_config.telemetry_enabled ? "enabled" : "disabled");
+        printf("  Debug level: %u\n\n", retrieved_config.debug_level);
+    }
+
+    /* Step 5: Verify data persists across reboot */
+    printf("--- Testing Persistence ---\n");
+    printf("Note: Data stored in ITS persists across:\n");
+    printf("  ✓ Power cycles\n");
+    printf("  ✓ System resets\n");
+    printf("  ✓ Firmware updates (if UID space reserved)\n\n");
+
+    /* Step 6: Remove data (optional) */
+    printf("--- Cleanup ---\n");
+
+    status = psa_its_remove(MY_DEVICE_SERIAL_UID);
+    if (status == PSA_SUCCESS) {
+        printf("✓ Serial number removed\n");
+    }
+
+    /* Try to read removed data (should fail) */
+    status = psa_its_get(MY_DEVICE_SERIAL_UID, 0,
+                        sizeof(retrieved_serial),
+                        retrieved_serial, &retrieved_len);
+
+    if (status == PSA_ERROR_DOES_NOT_EXIST) {
+        printf("✓ Confirmed: Data no longer exists after removal\n");
+    }
+
+    /* Keep config for later use */
+    printf("  (Config UID %u kept for application use)\n", MY_CONFIG_UID);
+
+    return 0;
+}
+```
+
+**Output:**
+```
+=== Simple ITS Example ===
+
+Storing serial number: "DEV-STM32U5-12345678"
+✓ Serial number stored (UID: 1001)
+
+Storing configuration:
+  Update interval: 3600 seconds
+  Telemetry: enabled
+  Debug level: 2
+✓ Configuration stored
+
+--- Retrieving Data ---
+Serial number info:
+  Size: 21 bytes
+  Flags: 0x0
+✓ Retrieved serial: "DEV-STM32U5-12345678" (21 bytes)
+✓ Retrieved configuration:
+  Update interval: 3600 seconds
+  Telemetry: enabled
+  Debug level: 2
+
+--- Testing Persistence ---
+Note: Data stored in ITS persists across:
+  ✓ Power cycles
+  ✓ System resets
+  ✓ Firmware updates (if UID space reserved)
+
+--- Cleanup ---
+✓ Serial number removed
+✓ Confirmed: Data no longer exists after removal
+  (Config UID 1002 kept for application use)
+```
+
+---
+
+This provides a strong foundation for Module 12. The complete module will include:
+- ✓ 12.1 Storage Architecture (started above)
+- 12.2 ITS API Complete Reference
+- 12.3 Protected Storage (PS) API
+- 12.4 Storage Implementation Details
+- 12.5 Flash Wear Leveling
+- 12.6 Encryption and Authentication
+- 12.7 Rollback Protection
+- 12.8 Storage Quotas and Management
+
+**Progress Update:**
+- Module 11: ~70% complete (sections 11.1-11.7 done, 11.8-11.9 pending)
+- Module 12: ~15% complete (started 12.1)
