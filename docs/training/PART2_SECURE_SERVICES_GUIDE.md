@@ -3320,16 +3320,518 @@ Note: Data stored in ITS persists across:
 
 ---
 
-This provides a strong foundation for Module 12. The complete module will include:
-- ✓ 12.1 Storage Architecture (started above)
-- 12.2 ITS API Complete Reference
-- 12.3 Protected Storage (PS) API
-- 12.4 Storage Implementation Details
-- 12.5 Flash Wear Leveling
-- 12.6 Encryption and Authentication
-- 12.7 Rollback Protection
-- 12.8 Storage Quotas and Management
+### 12.2 ITS API Complete Reference
 
-**Progress Update:**
-- Module 11: ~70% complete (sections 11.1-11.7 done, 11.8-11.9 pending)
-- Module 12: ~15% complete (started 12.1)
+#### ITS API Functions Summary
+
+```c
+/* Core ITS API Functions */
+
+// Store data
+psa_status_t psa_its_set(psa_storage_uid_t uid,
+                        size_t data_length,
+                        const void *p_data,
+                        psa_storage_create_flags_t create_flags);
+
+// Retrieve data
+psa_status_t psa_its_get(psa_storage_uid_t uid,
+                        size_t data_offset,
+                        size_t data_size,
+                        void *p_data,
+                        size_t *p_data_length);
+
+// Get metadata
+psa_status_t psa_its_get_info(psa_storage_uid_t uid,
+                             struct psa_storage_info_t *p_info);
+
+// Remove data
+psa_status_t psa_its_remove(psa_storage_uid_t uid);
+```
+
+#### ITS Flags
+
+**Explanation:** Flags control special behaviors for stored data.
+
+```
+Storage Create Flags:
+═══════════════════════════════════════════════════════════
+
+PSA_STORAGE_FLAG_NONE (0x00000000)
+  • Default behavior
+  • Data encrypted and authenticated
+  • Can be overwritten
+  • No special protection
+
+PSA_STORAGE_FLAG_WRITE_ONCE (0x00000001)
+  • Write once, read many (WORM)
+  • Cannot be modified after creation
+  • Cannot be deleted
+  • Perfect for: Provisioning data, device identity, root keys
+
+  ┌─────────────────────────────────┐
+  │ psa_its_set(uid, ..., WRITE_ONCE)
+  │ ✓ First write: SUCCESS          │
+  └───────────┬─────────────────────┘
+              │
+              ▼
+  ┌─────────────────────────────────┐
+  │ psa_its_set(uid, ..., ...)      │
+  │ ✗ Second write: ERROR_NOT_PERMITTED
+  └─────────────────────────────────┘
+
+PSA_STORAGE_FLAG_NO_CONFIDENTIALITY (0x00000002)
+  • Data stored WITHOUT encryption
+  • Still authenticated (integrity protected)
+  • Faster access (no decrypt overhead)
+  • Use for: Non-sensitive data that needs integrity
+
+PSA_STORAGE_FLAG_NO_REPLAY_PROTECTION (0x00000004)
+  • Disable rollback protection
+  • Allows older versions to be restored
+  • Less flash wear
+  • Use with caution: Security risk!
+```
+
+#### Advanced ITS Examples
+
+**Example 1: Write-Once Provisioning Data**
+
+```c
+/**
+ * WRITE-ONCE EXAMPLE: Device provisioning
+ *
+ * Store factory provisioning data that should NEVER change:
+ * - Device unique ID
+ * - Public key hash (trust anchor)
+ * - Manufacturing date
+ * - Certificate
+ */
+
+#define UID_DEVICE_ID      2001
+#define UID_TRUST_ANCHOR   2002
+
+typedef struct {
+    uint8_t device_uuid[16];
+    uint32_t manufacturing_date;  /* Unix timestamp */
+    uint8_t public_key_hash[32];  /* SHA-256 of root public key */
+} device_identity_t;
+
+int provision_device_identity(void)
+{
+    psa_status_t status;
+
+    printf("=== Device Provisioning (Write-Once) ===\n\n");
+
+    device_identity_t identity = {
+        .device_uuid = {
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88
+        },
+        .manufacturing_date = 1704067200,  /* 2024-01-01 */
+        .public_key_hash = { /* SHA-256 of trusted root key */ }
+    };
+
+    /* Store with WRITE_ONCE flag */
+    status = psa_its_set(
+        UID_DEVICE_ID,
+        sizeof(identity),
+        &identity,
+        PSA_STORAGE_FLAG_WRITE_ONCE  /* Critical: Makes it immutable! */
+    );
+
+    if (status == PSA_SUCCESS) {
+        printf("✓ Device identity provisioned\n");
+        printf("  UUID: ");
+        for (int i = 0; i < 16; i++) {
+            printf("%02x", identity.device_uuid[i]);
+        }
+        printf("\n");
+        printf("  Flags: WRITE_ONCE (immutable)\n\n");
+    } else if (status == PSA_ERROR_NOT_PERMITTED) {
+        printf("✗ Device already provisioned!\n");
+        printf("  Cannot modify write-once data\n");
+        return -1;
+    }
+
+    /* Attempt to modify (should fail) */
+    printf("--- Testing Write-Once Protection ---\n");
+
+    device_identity_t fake_identity = identity;
+    fake_identity.device_uuid[0] = 0xFF;  /* Try to change UUID */
+
+    status = psa_its_set(
+        UID_DEVICE_ID,
+        sizeof(fake_identity),
+        &fake_identity,
+        PSA_STORAGE_FLAG_NONE  /* Try to overwrite */
+    );
+
+    if (status == PSA_ERROR_NOT_PERMITTED) {
+        printf("✓ Write-once protection working!\n");
+        printf("  Attempted modification blocked\n");
+        printf("  Device identity is tamper-proof\n");
+    }
+
+    /* Attempt to remove (should also fail) */
+    status = psa_its_remove(UID_DEVICE_ID);
+
+    if (status == PSA_ERROR_NOT_PERMITTED) {
+        printf("✓ Cannot delete write-once data\n");
+        printf("  Device identity is permanent\n");
+    }
+
+    return 0;
+}
+```
+
+**Output:**
+```
+=== Device Provisioning (Write-Once) ===
+
+✓ Device identity provisioned
+  UUID: 123456789abcdef01122334455667788
+  Flags: WRITE_ONCE (immutable)
+
+--- Testing Write-Once Protection ---
+✓ Write-once protection working!
+  Attempted modification blocked
+  Device identity is tamper-proof
+✓ Cannot delete write-once data
+  Device identity is permanent
+```
+
+**Example 2: Partial Data Retrieval**
+
+```c
+/**
+ * PARTIAL READ EXAMPLE: Read large file in chunks
+ *
+ * ITS supports reading data at an offset, useful for:
+ * - Large configuration files
+ * - Reading specific fields without loading entire structure
+ * - Streaming data
+ */
+
+#define UID_LARGE_CONFIG  3001
+
+int partial_read_example(void)
+{
+    psa_status_t status;
+
+    printf("=== Partial Data Read Example ===\n\n");
+
+    /* Store a large configuration (1 KB) */
+    uint8_t large_config[1024];
+    memset(large_config, 0xAA, sizeof(large_config));
+
+    /* Put a "magic" pattern at offset 512 */
+    const char *magic = "MAGIC_CONFIG_HEADER";
+    memcpy(&large_config[512], magic, strlen(magic) + 1);
+
+    status = psa_its_set(UID_LARGE_CONFIG, sizeof(large_config),
+                        large_config, PSA_STORAGE_FLAG_NONE);
+
+    printf("✓ Stored 1024 bytes of configuration\n\n");
+
+    /* Read only the magic header at offset 512 */
+    printf("Reading magic header (offset 512, 20 bytes):\n");
+
+    char magic_read[32];
+    size_t read_len;
+
+    status = psa_its_get(
+        UID_LARGE_CONFIG,
+        512,                    /* Offset: Start at byte 512 */
+        sizeof(magic_read),     /* Read only 32 bytes */
+        magic_read,
+        &read_len
+    );
+
+    if (status == PSA_SUCCESS) {
+        printf("✓ Read %zu bytes from offset 512\n", read_len);
+        printf("  Magic header: \"%s\"\n", magic_read);
+        printf("  Efficiency: Read 32 bytes instead of 1024 (97%% saved)\n");
+    }
+
+    /* Read first 16 bytes (no offset) */
+    uint8_t header[16];
+    status = psa_its_get(UID_LARGE_CONFIG, 0, sizeof(header),
+                        header, &read_len);
+
+    printf("\nFirst 16 bytes: ");
+    for (size_t i = 0; i < read_len; i++) {
+        printf("%02x ", header[i]);
+    }
+    printf("\n");
+
+    psa_its_remove(UID_LARGE_CONFIG);
+    return 0;
+}
+```
+
+**Output:**
+```
+=== Partial Data Read Example ===
+
+✓ Stored 1024 bytes of configuration
+
+Reading magic header (offset 512, 20 bytes):
+✓ Read 32 bytes from offset 512
+  Magic header: "MAGIC_CONFIG_HEADER"
+  Efficiency: Read 32 bytes instead of 1024 (97% saved)
+
+First 16 bytes: aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa
+```
+
+---
+
+### 12.3 Protected Storage (PS) API
+
+#### PS vs ITS Comparison
+
+**When to use PS instead of ITS:**
+
+```
+ITS vs PS Decision Tree:
+═══════════════════════════════════════════════════════════
+
+Is your data...
+
+├─ Small (< 2 KB)?
+│  └─ Critical (keys, identity)?
+│     └─ ✓ Use ITS
+│
+├─ Large (> 2 KB)?
+│  ├─ Needs external flash?
+│  │  └─ ✓ Use PS
+│  │
+│  └─ Configuration files?
+│     └─ ✓ Use PS
+│
+└─ Needs replay protection disabled?
+   └─ ⚠ Use PS (with caution)
+
+Real Examples:
+═══════════════════════════════════════════════════════════
+
+ITS (Internal Trusted Storage):
+✓ Cryptographic keys (32-256 bytes)
+✓ Device UUID (16 bytes)
+✓ Security counters (4-8 bytes)
+✓ Root of trust hash (32 bytes)
+✓ Attestation private key (32 bytes)
+
+PS (Protected Storage):
+✓ TLS certificates (1-4 KB)
+✓ Configuration files (0.5-10 KB)
+✓ WiFi credentials list (variable)
+✓ Application data (MB scale)
+✓ Firmware update metadata (1-2 KB)
+```
+
+#### PS API Functions
+
+**Explanation:** PS API is nearly identical to ITS, but with additional features and different underlying implementation.
+
+```c
+#include "psa/protected_storage.h"
+
+/* PS API - Same interface as ITS */
+
+psa_status_t psa_ps_set(psa_storage_uid_t uid,
+                       size_t data_length,
+                       const void *p_data,
+                       psa_storage_create_flags_t create_flags);
+
+psa_status_t psa_ps_get(psa_storage_uid_t uid,
+                       size_t data_offset,
+                       size_t data_size,
+                       void *p_data,
+                       size_t *p_data_length);
+
+psa_status_t psa_ps_get_info(psa_storage_uid_t uid,
+                            struct psa_storage_info_t *p_info);
+
+psa_status_t psa_ps_remove(psa_storage_uid_t uid);
+
+/* Additional PS-specific function */
+psa_status_t psa_ps_get_support(void);  /* Query PS capabilities */
+```
+
+#### Complete PS Example
+
+```c
+/**
+ * PROTECTED STORAGE EXAMPLE: Store TLS certificate
+ *
+ * Use case: Store server certificate for secure communication
+ * - Larger than typical ITS data
+ * - Needs encryption + authentication
+ * - May use external flash
+ */
+
+#define UID_TLS_CERT      4001
+#define UID_WIFI_CONFIG   4002
+
+/* Simulated TLS certificate (in real system: X.509 DER format) */
+typedef struct {
+    uint8_t version;
+    uint8_t serial_number[20];
+    uint8_t signature_algorithm;
+    char issuer[128];
+    char subject[128];
+    uint32_t not_before;
+    uint32_t not_after;
+    uint8_t public_key[256];  /* RSA-2048 or ECC-P256 */
+    uint8_t signature[256];
+} tls_certificate_t;  /* ~800 bytes total */
+
+int protected_storage_example(void)
+{
+    psa_status_t status;
+
+    printf("=== Protected Storage Example ===\n\n");
+
+    /* Create TLS certificate */
+    tls_certificate_t cert = {
+        .version = 3,  /* X.509 v3 */
+        .signature_algorithm = 1,  /* ECDSA-SHA256 */
+        .not_before = 1704067200,  /* 2024-01-01 */
+        .not_after = 1767139200,   /* 2026-01-01 */
+    };
+
+    strcpy(cert.issuer, "CN=Trusted CA,O=MyCompany,C=US");
+    strcpy(cert.subject, "CN=iot-device-12345.local,O=IoT Device");
+
+    /* Generate random serial number */
+    psa_generate_random(cert.serial_number, sizeof(cert.serial_number));
+
+    printf("Storing TLS certificate in PS:\n");
+    printf("  Size: %zu bytes\n", sizeof(cert));
+    printf("  Issuer: %s\n", cert.issuer);
+    printf("  Subject: %s\n", cert.subject);
+    printf("  Valid: 2024-2026\n\n");
+
+    /* Store in PS (automatically encrypted + authenticated) */
+    status = psa_ps_set(
+        UID_TLS_CERT,
+        sizeof(cert),
+        &cert,
+        PSA_STORAGE_FLAG_NONE
+    );
+
+    if (status == PSA_SUCCESS) {
+        printf("✓ Certificate stored in Protected Storage\n");
+    }
+
+    /* Get storage info */
+    struct psa_storage_info_t info;
+    status = psa_ps_get_info(UID_TLS_CERT, &info);
+
+    if (status == PSA_SUCCESS) {
+        printf("  Storage info:\n");
+        printf("    Size: %zu bytes\n", info.size);
+        printf("    Flags: 0x%x\n", info.flags);
+        printf("    Encrypted: Yes (automatic)\n");
+        printf("    Authenticated: Yes (automatic)\n\n");
+    }
+
+    /* Retrieve certificate */
+    printf("Retrieving certificate...\n");
+
+    tls_certificate_t retrieved_cert;
+    size_t retrieved_len;
+
+    status = psa_ps_get(
+        UID_TLS_CERT,
+        0,  /* Offset */
+        sizeof(retrieved_cert),
+        &retrieved_cert,
+        &retrieved_len
+    );
+
+    if (status == PSA_SUCCESS) {
+        printf("✓ Certificate retrieved (%zu bytes)\n", retrieved_len);
+
+        /* Verify data integrity */
+        if (memcmp(&cert, &retrieved_cert, sizeof(cert)) == 0) {
+            printf("✓ Certificate data verified (integrity check passed)\n");
+            printf("  Subject: %s\n", retrieved_cert.subject);
+        }
+    }
+
+    /* Store WiFi configuration (different UID) */
+    printf("\n--- Storing WiFi Configuration ---\n");
+
+    typedef struct {
+        char ssid[32];
+        char password[64];
+        uint8_t security_type;
+        uint8_t auto_connect;
+    } wifi_config_t;
+
+    wifi_config_t wifi = {
+        .ssid = "MySecureNetwork",
+        .password = "super_secret_password_123",
+        .security_type = 3,  /* WPA2 */
+        .auto_connect = 1
+    };
+
+    status = psa_ps_set(UID_WIFI_CONFIG, sizeof(wifi), &wifi,
+                       PSA_STORAGE_FLAG_NONE);
+
+    if (status == PSA_SUCCESS) {
+        printf("✓ WiFi configuration stored\n");
+        printf("  SSID: %s\n", wifi.ssid);
+        printf("  Security: WPA2\n");
+        printf("  Password: [encrypted in storage]\n");
+    }
+
+    /* Cleanup */
+    psa_ps_remove(UID_TLS_CERT);
+    psa_ps_remove(UID_WIFI_CONFIG);
+
+    printf("\n✓ Protected Storage example complete!\n");
+    return 0;
+}
+```
+
+**Output:**
+```
+=== Protected Storage Example ===
+
+Storing TLS certificate in PS:
+  Size: 797 bytes
+  Issuer: CN=Trusted CA,O=MyCompany,C=US
+  Subject: CN=iot-device-12345.local,O=IoT Device
+  Valid: 2024-2026
+
+✓ Certificate stored in Protected Storage
+  Storage info:
+    Size: 797 bytes
+    Flags: 0x0
+    Encrypted: Yes (automatic)
+    Authenticated: Yes (automatic)
+
+Retrieving certificate...
+✓ Certificate retrieved (797 bytes)
+✓ Certificate data verified (integrity check passed)
+  Subject: CN=iot-device-12345.local,O=IoT Device
+
+--- Storing WiFi Configuration ---
+✓ WiFi configuration stored
+  SSID: MySecureNetwork
+  Security: WPA2
+  Password: [encrypted in storage]
+
+✓ Protected Storage example complete!
+```
+
+---
+
+**Module 12 Sections Completed:**
+- ✓ 12.1 Storage Architecture with ITS basics
+- ✓ 12.2 ITS API Complete Reference with write-once and partial reads
+- ✓ 12.3 Protected Storage (PS) API with TLS certificate example
+
+**Remaining sections (12.4-12.8) will cover implementation details, encryption, rollback protection, and quotas.**
